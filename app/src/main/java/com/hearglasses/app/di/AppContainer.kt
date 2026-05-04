@@ -1,0 +1,93 @@
+package com.hearglasses.app.di
+
+import android.content.Context
+import com.hearglasses.app.asr.SherpaModelConfig
+import com.hearglasses.app.asr.SpeechRecognizerEngine
+import com.hearglasses.app.audio.OpusDecoder
+import com.hearglasses.app.ble.BleConstants
+import com.hearglasses.app.ble.BleManager
+import com.hearglasses.app.ble.FileBleManager
+import com.hearglasses.app.ble.MicBleManager
+import com.hearglasses.app.ble.RealBleManager
+import com.hearglasses.app.service.HearGlassesController
+import com.hearglasses.app.settings.GeekSettings
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+enum class DebugMode(val label: String) {
+    REAL_BLE("硬件 BLE"),
+    FILE("本地文件"),
+    MIC("手机麦克风"),
+}
+
+class AppContainer(context: Context) {
+    private val appContext = context.applicationContext
+
+    companion object {
+        @Volatile
+        private var instance: AppContainer? = null
+
+        fun getInstance(context: Context): AppContainer {
+            return instance ?: synchronized(this) {
+                instance ?: AppContainer(context.applicationContext).also { instance = it }
+            }
+        }
+    }
+
+    private val _settings = MutableStateFlow(GeekSettings())
+    val settings: StateFlow<GeekSettings> = _settings.asStateFlow()
+
+    fun updateSettings(transform: (GeekSettings) -> GeekSettings) {
+        _settings.value = transform(_settings.value)
+    }
+
+    val debugMode: DebugMode get() = _settings.value.debugMode
+
+    var bleManager: BleManager = createBleManager(_settings.value.debugMode)
+        private set
+
+    var controller: HearGlassesController
+        private set
+
+    private fun createBleManager(mode: DebugMode): BleManager = when (mode) {
+        DebugMode.FILE -> FileBleManager(appContext)
+        DebugMode.REAL_BLE -> RealBleManager(
+            context = appContext,
+            config = BleConstants.defaultConfig,
+        )
+        DebugMode.MIC -> MicBleManager(appContext)
+    }
+
+    val opusDecoder = OpusDecoder(sampleRate = 16_000, channelCount = 1)
+
+    private val sherpaModelConfig = SherpaModelConfig(
+        model = "sherpa-onnx-streaming-ctc-zh/model.int8.onnx",
+        tokens = "sherpa-onnx-streaming-ctc-zh/tokens.txt",
+    )
+
+    val speechRecognizerEngine = SpeechRecognizerEngine(
+        context = appContext,
+        sherpaModelConfig = sherpaModelConfig,
+    )
+
+    private fun createController() = HearGlassesController(
+        bleManager = bleManager,
+        opusDecoder = opusDecoder,
+        speechRecognizerEngine = speechRecognizerEngine,
+    )
+
+    /**
+     * Re-create the BLE manager and controller for a new audio source.
+     * Call this before starting the service / listening.
+     */
+    fun switchAudioSource(mode: DebugMode) {
+        bleManager.disconnect()
+        bleManager = createBleManager(mode)
+        controller = createController()
+    }
+
+    init {
+        controller = createController()
+    }
+}
