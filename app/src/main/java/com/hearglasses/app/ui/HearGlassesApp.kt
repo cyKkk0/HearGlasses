@@ -34,8 +34,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,7 +79,6 @@ fun HearGlassesApp(
     }
 
     val listState = rememberLazyListState()
-    val isViewingHistory = uiState.transcriptItems.isNotEmpty() && !shouldAutoScroll(listState)
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -86,7 +88,6 @@ fun HearGlassesApp(
             controller = controller,
             uiState = uiState,
             listState = listState,
-            isViewingHistory = isViewingHistory,
             onToggleListening = ::handleToggle,
             settingsSummary = settingsSummary(settings),
             onOpenSettings = { showSettings = true },
@@ -202,14 +203,43 @@ private fun HearGlassesScreen(
     controller: HearGlassesController,
     uiState: AppUiState,
     listState: LazyListState,
-    isViewingHistory: Boolean,
     onToggleListening: () -> Unit,
     settingsSummary: String,
     onOpenSettings: () -> Unit,
 ) {
-    LaunchedEffect(uiState.transcriptItems.size) {
-        if (uiState.transcriptItems.isNotEmpty() && shouldAutoScroll(listState)) {
-            listState.animateScrollToItem(uiState.transcriptItems.lastIndex)
+    var userScrolledUp by remember { mutableStateOf(false) }
+
+    // Reset flag when user reaches or is force-navigated to the bottom
+    val isAtBottom by remember {
+        derivedStateOf {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
+                ?: return@derivedStateOf true
+            lastVisible >= listState.layoutInfo.totalItemsCount - 1
+        }
+    }
+
+    LaunchedEffect(isAtBottom) {
+        if (isAtBottom) userScrolledUp = false
+    }
+
+    // Detect when user manually scrolls away from bottom
+    LaunchedEffect(controller) {
+        controller.uiState.collect { state ->
+            if (state.transcriptItems.isNotEmpty() && !userScrolledUp) {
+                listState.animateScrollToItem(state.transcriptItems.lastIndex)
+            }
+        }
+    }
+
+    // Mark userScrolledUp = true when they scroll away (not at bottom and scroll in progress)
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (!listState.isScrollInProgress) {
+            // Scroll just finished — check if we ended away from bottom
+            snapshotFlow { isAtBottom }
+                .first()
+                .let { atBottom ->
+                    if (!atBottom) userScrolledUp = true
+                }
         }
     }
 
@@ -236,7 +266,8 @@ private fun HearGlassesScreen(
             listState = listState,
             items = uiState.transcriptItems,
             placeholderText = uiState.placeholderText,
-            showJumpToBottom = isViewingHistory,
+            showJumpToBottom = userScrolledUp && uiState.transcriptItems.isNotEmpty(),
+            onJumpToBottom = { userScrolledUp = false },
         )
         Spacer(modifier = Modifier.height(20.dp))
         ControlPanel(
@@ -246,12 +277,6 @@ private fun HearGlassesScreen(
             onOpenSettings = onOpenSettings,
         )
     }
-}
-
-private fun shouldAutoScroll(listState: LazyListState): Boolean {
-    val layoutInfo = listState.layoutInfo
-    val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return true
-    return lastVisibleIndex >= layoutInfo.totalItemsCount - 2
 }
 
 @Composable
@@ -357,6 +382,7 @@ private fun TranscriptPanel(
     items: List<TranscriptItem>,
     placeholderText: String,
     showJumpToBottom: Boolean,
+    onJumpToBottom: () -> Unit,
 ) {
     val coroutineScope = rememberCoroutineScope()
 
@@ -389,6 +415,7 @@ private fun TranscriptPanel(
         if (showJumpToBottom) {
             Button(
                 onClick = {
+                    onJumpToBottom()
                     if (items.isNotEmpty()) {
                         coroutineScope.launch {
                             listState.animateScrollToItem(items.lastIndex)
