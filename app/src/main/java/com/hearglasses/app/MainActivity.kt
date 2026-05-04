@@ -54,9 +54,9 @@ class MainActivity : ComponentActivity() {
         if (isListening) {
             stopService(intent)
         } else {
-            // Switch audio source if the setting changed
-            if (appContainer.debugMode != appContainer.settings.value.debugMode) {
-                appContainer.switchAudioSource(appContainer.settings.value.debugMode)
+            // Switch audio source if the user changed it in settings
+            if (appContainer.isSettingsOutdated()) {
+                appContainer.switchAudioSource(appContainer.debugMode)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent)

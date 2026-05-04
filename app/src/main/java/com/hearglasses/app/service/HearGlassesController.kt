@@ -31,6 +31,7 @@ data class DebugPanelState(
     val decoderInfo: String = "",
     val mtu: Int = 23,
     val packetCount: Int = 0,
+    val peakAmplitude: Int = 0,
     val lastPartialText: String = "",
     val lastFinalText: String = "",
 )
@@ -76,6 +77,7 @@ class HearGlassesController(
                 transcriptItems = emptyList(),
                 debugPanelState = it.debugPanelState.copy(
                     packetCount = 0,
+                    peakAmplitude = 0,
                     lastPartialText = "",
                     lastFinalText = "",
                 ),
@@ -116,6 +118,7 @@ class HearGlassesController(
                     } else {
                         opusDecoder.decode(event.bytes)
                     }
+                    val peak = decoded.maxOfOrNull { kotlin.math.abs(it.toInt()) } ?: 0
                     val result = speechRecognizerEngine.acceptWaveform(
                         decoded,
                         audioSampleRate = bleManager.audioSampleRate,
@@ -126,12 +129,18 @@ class HearGlassesController(
                                 asrMode = speechRecognizerEngine.modeLabel,
                                 asrInitError = speechRecognizerEngine.fullInitError() ?: "",
                                 packetCount = it.debugPanelState.packetCount + 1,
+                                peakAmplitude = maxOf(it.debugPanelState.peakAmplitude, peak),
                                 lastPartialText = result.partialText,
                             ),
                         )
                     }
                     if (result.partialText.isNotBlank()) {
                         pushTranscript(result.partialText, active = true, replaceActive = true)
+                    }
+                    if (result.isEndpoint) {
+                        // Finalize the current utterance → marks it as a completed line
+                        finalizeActiveTranscript()
+                        speechRecognizerEngine.resetStream()
                     }
                 }
                 is BleEvent.CommandPacket -> {
@@ -146,6 +155,7 @@ class HearGlassesController(
             }
         }
         syncBleState()
+        pruneOldTranscripts()
     }
 
     private fun syncBleState() {
@@ -231,6 +241,17 @@ class HearGlassesController(
         _uiState.update { state ->
             state.copy(
                 transcriptItems = state.transcriptItems.map { it.copy(isActive = false) },
+            )
+        }
+    }
+
+    private fun pruneOldTranscripts() {
+        val now = System.currentTimeMillis()
+        _uiState.update { state ->
+            state.copy(
+                transcriptItems = state.transcriptItems.filter {
+                    now - it.timestampMillis <= TRANSCRIPT_RETENTION_MILLIS
+                },
             )
         }
     }

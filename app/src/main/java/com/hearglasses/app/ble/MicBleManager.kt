@@ -130,8 +130,8 @@ class MicBleManager(
                 }
 
                 if (read > 0) {
-                    val frame = if (read == FRAME_SIZE_BYTES) buffer else buffer.copyOf(read)
-                    eventQueue += BleEvent.AudioPacket(frame)
+                    // Always copy — the buffer will be reused on the next read
+                    eventQueue += BleEvent.AudioPacket(buffer.copyOf(read))
                 } else if (read == AudioRecord.ERROR_INVALID_OPERATION ||
                     read == AudioRecord.ERROR_DEAD_OBJECT
                 ) {

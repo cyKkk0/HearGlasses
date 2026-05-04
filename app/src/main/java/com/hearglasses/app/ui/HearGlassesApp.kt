@@ -60,7 +60,8 @@ fun HearGlassesApp(
     onRequestPermissions: () -> Unit = {},
     onGoToSettings: () -> Unit = {},
 ) {
-    val controller = remember(appContainer) { appContainer.controller }
+    val generation by appContainer.generation.collectAsState()
+    val controller = remember(generation) { appContainer.controller }
     val uiState by controller.uiState.collectAsState()
     val settings by appContainer.settings.collectAsState()
     var showSettings by remember { mutableStateOf(false) }
@@ -320,6 +321,7 @@ private fun DebugPanel(debugPanelState: DebugPanelState) {
             }
             DebugRow(label = "MTU", value = debugPanelState.mtu.toString())
             DebugRow(label = "音频包数", value = debugPanelState.packetCount.toString())
+            DebugRow(label = "峰值振幅", value = debugPanelState.peakAmplitude.toString())
             DebugRow(label = "最近 partial", value = debugPanelState.lastPartialText.ifBlank { "-" })
             DebugRow(label = "最近 final", value = debugPanelState.lastFinalText.ifBlank { "-" })
         }

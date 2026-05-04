@@ -44,7 +44,10 @@ class AppContainer(context: Context) {
 
     val debugMode: DebugMode get() = _settings.value.debugMode
 
-    var bleManager: BleManager = createBleManager(_settings.value.debugMode)
+    /** The debug mode currently applied to the running bleManager/controller. */
+    private var appliedDebugMode: DebugMode = _settings.value.debugMode
+
+    var bleManager: BleManager = createBleManager(appliedDebugMode)
         private set
 
     var controller: HearGlassesController
@@ -66,10 +69,17 @@ class AppContainer(context: Context) {
         tokens = "sherpa-onnx-streaming-ctc-zh/tokens.txt",
     )
 
-    val speechRecognizerEngine = SpeechRecognizerEngine(
+    var speechRecognizerEngine: SpeechRecognizerEngine = createSpeechRecognizerEngine(_settings.value.vadThreshold)
+        private set
+
+    private fun createSpeechRecognizerEngine(vadThreshold: Float) = SpeechRecognizerEngine(
         context = appContext,
         sherpaModelConfig = sherpaModelConfig,
+        vadThreshold = vadThreshold,
     )
+
+    private val _generation = MutableStateFlow(0)
+    val generation: StateFlow<Int> = _generation.asStateFlow()
 
     private fun createController() = HearGlassesController(
         bleManager = bleManager,
@@ -84,8 +94,14 @@ class AppContainer(context: Context) {
     fun switchAudioSource(mode: DebugMode) {
         bleManager.disconnect()
         bleManager = createBleManager(mode)
+        speechRecognizerEngine = createSpeechRecognizerEngine(_settings.value.vadThreshold)
         controller = createController()
+        appliedDebugMode = mode
+        _generation.value++
     }
+
+    /** Returns true if settings have changed since last apply. */
+    fun isSettingsOutdated(): Boolean = _settings.value.debugMode != appliedDebugMode
 
     init {
         controller = createController()

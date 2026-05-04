@@ -29,6 +29,7 @@ data class SherpaModelConfig(
 class SpeechRecognizerEngine(
     context: Context? = null,
     private val sherpaModelConfig: SherpaModelConfig? = null,
+    private val vadThreshold: Float = 0.5f,
 ) {
     private val scriptedSentences = listOf(
         "哎，你听得清我说话吗？",
@@ -140,6 +141,12 @@ class SpeechRecognizerEngine(
             .toInt()
             .coerceIn(1, sentence.length)
         return RecognitionResult(partialText = sentence.take(partialLength))
+    }
+
+    fun resetStream() {
+        onlineStream?.release()
+        onlineStream = null
+        lastSherpaText = ""
     }
 
     fun forceFinalize(): RecognitionResult {
