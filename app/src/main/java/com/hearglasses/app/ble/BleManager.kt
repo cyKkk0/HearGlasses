@@ -23,6 +23,8 @@ interface BleManager {
     val audioSampleRate: Int get() = 16_000
     /** Human-readable audio file info, e.g. "16000Hz/1ch/16bit". */
     val audioInfo: String get() = ""
+    /** True when incoming PCM should also be played through the phone speaker. */
+    val playIncomingPcm: Boolean get() = false
     val uiState: StateFlow<BleUiState>
 
     fun connect()

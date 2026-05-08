@@ -35,3 +35,11 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# ASR model artifacts
+app/src/main/assets/**/*.onnx
+app/src/main/assets/**/test_wavs/
+
+# Python cache
+__pycache__/
+*.py[cod]

@@ -10,11 +10,9 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
-import android.os.ParcelUuid
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,17 +39,29 @@ class RealBleManager(
     override val uiState: StateFlow<BleUiState> = _uiState.asStateFlow()
 
     override val modeLabel: String = "真实 BLE"
-    override val isAudioPcm: Boolean = false
+    override val isAudioPcm: Boolean = true
     override val audioSampleRate: Int get() = 16_000
-    override val audioInfo: String get() = "Opus 16kHz/1ch"
+    override val audioInfo: String get() = "PCM 16000Hz/1ch/16bit"
+    override val playIncomingPcm: Boolean = true
 
     private var targetAddress: String? = null
     private var isScanning = false
+    private var probingAddress: String? = null
+    private val probedAddresses = mutableSetOf<String>()
+    private var scanResultCount = 0
 
     @SuppressLint("MissingPermission")
     override fun connect() {
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
             emitError("蓝牙未开启")
+            return
+        }
+
+        if (FIXED_DEVICE_ADDRESS.isNotBlank()) {
+            targetAddress = FIXED_DEVICE_ADDRESS
+            val device = bluetoothAdapter.getRemoteDevice(FIXED_DEVICE_ADDRESS)
+            _uiState.update { it.copy(statusText = "直连中 ($FIXED_DEVICE_ADDRESS)") }
+            connectToDevice(device)
             return
         }
 
@@ -76,6 +86,8 @@ class RealBleManager(
         audioCharacteristic = null
         commandCharacteristic = null
         textRxCharacteristic = null
+        probingAddress = null
+        probedAddresses.clear()
         _uiState.value = BleUiState(statusText = "已断开")
     }
 
@@ -117,23 +129,36 @@ class RealBleManager(
         }
 
         _uiState.update { it.copy(statusText = "扫描中…") }
+        probingAddress = null
+        probedAddresses.clear()
+        scanResultCount = 0
 
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(config.serviceUuid))
-            .build()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setReportDelay(0)
             .build()
 
         isScanning = true
-        scanner.startScan(listOf(filter), settings, scanCallback)
+        try {
+            scanner.startScan(null, settings, scanCallback)
+        } catch (e: SecurityException) {
+            isScanning = false
+            emitError("缺少蓝牙扫描权限")
+            Log.w(TAG, "BLE scan permission error", e)
+            return
+        } catch (e: Exception) {
+            isScanning = false
+            emitError("扫描启动失败: ${e.javaClass.simpleName}")
+            Log.w(TAG, "BLE scan start error", e)
+            return
+        }
 
         // 15-second scan timeout
         appContext.mainLooper.let { looper ->
             android.os.Handler(looper).postDelayed({
                 if (isScanning) {
                     stopScan()
-                    _uiState.update { it.copy(statusText = "未找到设备") }
+                    _uiState.update { it.copy(statusText = "未找到 HearGlasses ($scanResultCount 个广播)") }
                 }
             }, SCAN_TIMEOUT_MS)
         }
@@ -149,9 +174,21 @@ class RealBleManager(
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
+            scanResultCount++
+            val label = result.scanRecord?.deviceName ?: device.name ?: device.address
+            _uiState.update { it.copy(statusText = "扫描中: $scanResultCount 个, 最近 $label") }
+            val matchedByAdvertisement = matchesTargetDevice(result)
+            if (!matchedByAdvertisement && !shouldProbeDevice(device)) {
+                return
+            }
+
             stopScan()
             targetAddress = device.address
-            _uiState.update { it.copy(statusText = "连接中 (${device.name ?: device.address})") }
+            probingAddress = if (matchedByAdvertisement) null else device.address
+            _uiState.update {
+                val prefix = if (matchedByAdvertisement) "连接中" else "探测设备"
+                it.copy(statusText = "$prefix ($label)")
+            }
             connectToDevice(device)
         }
 
@@ -165,6 +202,34 @@ class RealBleManager(
             }
             emitError(msg)
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun matchesTargetDevice(result: ScanResult): Boolean {
+        val advertisedName = result.scanRecord?.deviceName
+        val deviceName = result.device.name
+        val serviceMatches = result.scanRecord
+            ?.serviceUuids
+            ?.any { it.uuid == config.serviceUuid } == true
+        val nameMatches = advertisedName == DEVICE_NAME || deviceName == DEVICE_NAME
+
+        if (serviceMatches || nameMatches) {
+            Log.i(
+                TAG,
+                "Matched BLE device name=${advertisedName ?: deviceName}, " +
+                    "address=${result.device.address}, serviceMatches=$serviceMatches",
+            )
+            return true
+        }
+        return false
+    }
+
+    private fun shouldProbeDevice(device: BluetoothDevice): Boolean {
+        if (!PROBE_UNMATCHED_SCAN_RESULTS) return false
+        if (probingAddress != null) return false
+        if (probedAddresses.contains(device.address)) return false
+        probedAddresses += device.address
+        return true
     }
 
     // ── GATT Connection ───────────────────────────────────────────────
@@ -183,7 +248,12 @@ class RealBleManager(
                 Log.w(TAG, "Connection state change error: status=$status")
                 bluetoothGatt?.close()
                 bluetoothGatt = null
-                _uiState.update { it.copy(isConnected = false, statusText = "连接失败") }
+                val wasProbing = probingAddress != null
+                probingAddress = null
+                _uiState.update { it.copy(isConnected = false, statusText = if (wasProbing) "继续扫描…" else "连接失败") }
+                if (wasProbing) {
+                    startScan()
+                }
                 return
             }
             when (newState) {
@@ -193,11 +263,16 @@ class RealBleManager(
                     gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    val wasProbing = probingAddress != null
                     bluetoothGatt = null
                     audioCharacteristic = null
                     commandCharacteristic = null
                     textRxCharacteristic = null
-                    _uiState.update { it.copy(isConnected = false, statusText = "已断开") }
+                    probingAddress = null
+                    _uiState.update { it.copy(isConnected = false, statusText = if (wasProbing) "继续扫描…" else "已断开") }
+                    if (wasProbing) {
+                        startScan()
+                    }
                 }
             }
         }
@@ -212,10 +287,20 @@ class RealBleManager(
             val service = gatt.getService(config.serviceUuid)
             if (service == null) {
                 Log.w(TAG, "Target service ${config.serviceUuid} not found")
-                _uiState.update { it.copy(statusText = "服务不匹配") }
+                val wasProbing = probingAddress != null
+                probingAddress = null
+                bluetoothGatt?.disconnect()
+                bluetoothGatt?.close()
+                bluetoothGatt = null
+                _uiState.update { it.copy(isConnected = false, statusText = if (wasProbing) "继续扫描…" else "服务不匹配") }
+                if (wasProbing) {
+                    startScan()
+                }
                 return
             }
 
+            probingAddress = null
+            targetAddress = gatt.device.address
             audioCharacteristic = service.getCharacteristic(config.audioTxUuid)
             commandCharacteristic = service.getCharacteristic(config.commandTxUuid)
             textRxCharacteristic = service.getCharacteristic(config.textRxUuid)
@@ -293,7 +378,10 @@ class RealBleManager(
 
     private companion object {
         private const val TAG = "RealBleManager"
-        private const val SCAN_TIMEOUT_MS = 15_000L
+        private const val DEVICE_NAME = "HearGlasses"
+        private const val FIXED_DEVICE_ADDRESS = "14:C1:9F:26:C5:61"
+        private const val SCAN_TIMEOUT_MS = 45_000L
+        private const val PROBE_UNMATCHED_SCAN_RESULTS = true
 
         // Standard CCCD UUID for enabling BLE notifications
         private val CLIENT_CHARACTERISTIC_CONFIG_UUID =

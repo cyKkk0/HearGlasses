@@ -3,6 +3,7 @@ package com.hearglasses.app.service
 import com.hearglasses.app.asr.RecognitionResult
 import com.hearglasses.app.asr.SpeechRecognizerEngine
 import com.hearglasses.app.audio.OpusDecoder
+import com.hearglasses.app.audio.PcmAudioPlayer
 import com.hearglasses.app.ble.BleConstants
 import com.hearglasses.app.ble.BleEvent
 import com.hearglasses.app.ble.BleManager
@@ -49,6 +50,7 @@ data class AppUiState(
 class HearGlassesController(
     private val bleManager: BleManager,
     private val opusDecoder: OpusDecoder,
+    private val pcmAudioPlayer: PcmAudioPlayer,
     private val speechRecognizerEngine: SpeechRecognizerEngine,
 ) {
     private var nextId = 0L
@@ -70,6 +72,9 @@ class HearGlassesController(
     fun startListening() {
         if (_uiState.value.isListening) return
         bleManager.connect()
+        if (bleManager.playIncomingPcm) {
+            pcmAudioPlayer.start(bleManager.audioSampleRate)
+        }
         _uiState.update {
             it.copy(
                 isListening = true,
@@ -90,6 +95,7 @@ class HearGlassesController(
         if (!_uiState.value.isListening) return
         stopPolling()
         bleManager.disconnect()
+        pcmAudioPlayer.stop()
         finalizeActiveTranscript()
         syncBleState()
         _uiState.update {
@@ -117,6 +123,9 @@ class HearGlassesController(
                         pcmBytesToShortArray(event.bytes)
                     } else {
                         opusDecoder.decode(event.bytes)
+                    }
+                    if (bleManager.playIncomingPcm) {
+                        pcmAudioPlayer.write(decoded)
                     }
                     val peak = decoded.maxOfOrNull { kotlin.math.abs(it.toInt()) } ?: 0
                     val result = speechRecognizerEngine.acceptWaveform(

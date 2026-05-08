@@ -34,12 +34,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.snapshotFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,7 +48,6 @@ import androidx.compose.ui.window.Dialog
 import com.hearglasses.app.di.AppContainer
 import com.hearglasses.app.service.AppUiState
 import com.hearglasses.app.service.DebugPanelState
-import com.hearglasses.app.service.HearGlassesController
 import com.hearglasses.app.service.TranscriptItem
 
 @Composable
@@ -85,7 +80,6 @@ fun HearGlassesApp(
         color = Color.White,
     ) {
         HearGlassesScreen(
-            controller = controller,
             uiState = uiState,
             listState = listState,
             onToggleListening = ::handleToggle,
@@ -200,46 +194,22 @@ private fun settingsSummary(s: com.hearglasses.app.settings.GeekSettings): Strin
 
 @Composable
 private fun HearGlassesScreen(
-    controller: HearGlassesController,
     uiState: AppUiState,
     listState: LazyListState,
     onToggleListening: () -> Unit,
     settingsSummary: String,
     onOpenSettings: () -> Unit,
 ) {
-    var userScrolledUp by remember { mutableStateOf(false) }
+    val latestTranscript = uiState.transcriptItems.lastOrNull()
 
-    // Reset flag when user reaches or is force-navigated to the bottom
-    val isAtBottom by remember {
-        derivedStateOf {
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
-                ?: return@derivedStateOf true
-            lastVisible >= listState.layoutInfo.totalItemsCount - 1
-        }
-    }
-
-    LaunchedEffect(isAtBottom) {
-        if (isAtBottom) userScrolledUp = false
-    }
-
-    // Detect when user manually scrolls away from bottom
-    LaunchedEffect(controller) {
-        controller.uiState.collect { state ->
-            if (state.transcriptItems.isNotEmpty() && !userScrolledUp) {
-                listState.animateScrollToItem(state.transcriptItems.lastIndex)
-            }
-        }
-    }
-
-    // Mark userScrolledUp = true when they scroll away (not at bottom and scroll in progress)
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (!listState.isScrollInProgress) {
-            // Scroll just finished — check if we ended away from bottom
-            snapshotFlow { isAtBottom }
-                .first()
-                .let { atBottom ->
-                    if (!atBottom) userScrolledUp = true
-                }
+    LaunchedEffect(
+        uiState.transcriptItems.size,
+        latestTranscript?.id,
+        latestTranscript?.text,
+    ) {
+        if (uiState.transcriptItems.isNotEmpty()) {
+            withFrameNanos { }
+            listState.scrollToItem(uiState.transcriptItems.size)
         }
     }
 
@@ -266,8 +236,6 @@ private fun HearGlassesScreen(
             listState = listState,
             items = uiState.transcriptItems,
             placeholderText = uiState.placeholderText,
-            showJumpToBottom = userScrolledUp && uiState.transcriptItems.isNotEmpty(),
-            onJumpToBottom = { userScrolledUp = false },
         )
         Spacer(modifier = Modifier.height(20.dp))
         ControlPanel(
@@ -381,11 +349,7 @@ private fun TranscriptPanel(
     listState: LazyListState,
     items: List<TranscriptItem>,
     placeholderText: String,
-    showJumpToBottom: Boolean,
-    onJumpToBottom: () -> Unit,
 ) {
-    val coroutineScope = rememberCoroutineScope()
-
     if (items.isEmpty()) {
         Box(
             modifier = modifier,
@@ -410,24 +374,8 @@ private fun TranscriptPanel(
             items(items, key = { it.id }) { item ->
                 TranscriptLine(item = item)
             }
-        }
-
-        if (showJumpToBottom) {
-            Button(
-                onClick = {
-                    onJumpToBottom()
-                    if (items.isNotEmpty()) {
-                        coroutineScope.launch {
-                            listState.animateScrollToItem(items.lastIndex)
-                        }
-                    }
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(12.dp),
-                shape = RoundedCornerShape(999.dp),
-            ) {
-                Text(text = "回到底部")
+            item(key = "bottom-anchor") {
+                Spacer(modifier = Modifier.height(1.dp))
             }
         }
     }

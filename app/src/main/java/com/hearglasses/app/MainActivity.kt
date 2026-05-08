@@ -52,12 +52,14 @@ class MainActivity : ComponentActivity() {
         val isListening = appContainer.controller.uiState.value.isListening
         val intent = Intent(this, HearGlassesService::class.java)
         if (isListening) {
+            appContainer.controller.stopListening()
             stopService(intent)
         } else {
             // Switch audio source if the user changed it in settings
             if (appContainer.isSettingsOutdated()) {
                 appContainer.switchAudioSource(appContainer.debugMode)
             }
+            appContainer.controller.startListening()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent)
             } else {
@@ -78,6 +80,8 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 add(Manifest.permission.BLUETOOTH_CONNECT)
                 add(Manifest.permission.BLUETOOTH_SCAN)
+            } else {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
