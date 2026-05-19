@@ -70,6 +70,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.bihe0832.android:lib-sherpa-onnx:8.5.1")
+    implementation("io.github.jaredmdobson:concentus:1.0.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.8")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.6.8")

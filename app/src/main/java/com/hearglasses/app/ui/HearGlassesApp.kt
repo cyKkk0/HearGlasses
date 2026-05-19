@@ -308,12 +308,17 @@ private fun DebugPanel(debugPanelState: DebugPanelState) {
             if (debugPanelState.decoderInfo.isNotBlank()) {
                 DebugRow(label = "解码器", value = debugPanelState.decoderInfo)
             }
+            if (debugPanelState.recordingInfo.isNotBlank()) {
+                DebugRow(label = "录音文件", value = debugPanelState.recordingInfo)
+            }
             DebugRow(label = "ASR引擎", value = debugPanelState.asrMode)
             if (debugPanelState.asrInitError.isNotBlank()) {
                 DebugRow(label = "ASR错误", value = debugPanelState.asrInitError)
             }
             DebugRow(label = "MTU", value = debugPanelState.mtu.toString())
             DebugRow(label = "音频包数", value = debugPanelState.packetCount.toString())
+            DebugRow(label = "BLE收到包", value = debugPanelState.bleReceivedPackets.toString())
+            DebugRow(label = "BLE丢包", value = debugPanelState.bleLostPackets.toString())
             DebugRow(label = "峰值振幅", value = debugPanelState.peakAmplitude.toString())
             DebugRow(label = "最近 partial", value = debugPanelState.lastPartialText.ifBlank { "-" })
             DebugRow(label = "最近 final", value = debugPanelState.lastFinalText.ifBlank { "-" })

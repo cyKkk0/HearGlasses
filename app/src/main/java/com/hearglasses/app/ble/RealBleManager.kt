@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.UUID
 
 class RealBleManager(
     context: Context,
@@ -34,15 +35,20 @@ class RealBleManager(
 
     // Thread-safe event queue
     private val eventQueue = ConcurrentLinkedQueue<BleEvent>()
+    private val notificationQueueLock = Any()
+    private val pendingNotificationCharacteristics = ArrayDeque<BluetoothGattCharacteristic>()
+    private var expectedAudioPacketSequence: Int? = null
+    private var receivedAudioPacketCount = 0L
+    private var lostAudioPacketCount = 0L
 
     private val _uiState = MutableStateFlow(BleUiState())
     override val uiState: StateFlow<BleUiState> = _uiState.asStateFlow()
 
     override val modeLabel: String = "真实 BLE"
-    override val isAudioPcm: Boolean = true
+    override val isAudioPcm: Boolean = false
     override val audioSampleRate: Int get() = 16_000
-    override val audioInfo: String get() = "PCM 16000Hz/1ch/16bit"
-    override val playIncomingPcm: Boolean = true
+    override val audioInfo: String get() = "Opus 16000Hz/1ch"
+    override val playIncomingPcm: Boolean = false
 
     private var targetAddress: String? = null
     private var isScanning = false
@@ -86,6 +92,10 @@ class RealBleManager(
         audioCharacteristic = null
         commandCharacteristic = null
         textRxCharacteristic = null
+        expectedAudioPacketSequence = null
+        synchronized(notificationQueueLock) {
+            pendingNotificationCharacteristics.clear()
+        }
         probingAddress = null
         probedAddresses.clear()
         _uiState.value = BleUiState(statusText = "已断开")
@@ -102,6 +112,7 @@ class RealBleManager(
         // BLE MTU limits payload; chunk if needed (simple: single write up to MTU-3)
         val maxPayload = (_uiState.value.mtu - 3).coerceAtLeast(20)
         val payload = if (bytes.size > maxPayload) bytes.copyOf(maxPayload) else bytes
+        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         char.value = payload
         val success = bluetoothGatt?.writeCharacteristic(char) ?: false
         if (!success) {
@@ -268,6 +279,10 @@ class RealBleManager(
                     audioCharacteristic = null
                     commandCharacteristic = null
                     textRxCharacteristic = null
+                    expectedAudioPacketSequence = null
+                    synchronized(notificationQueueLock) {
+                        pendingNotificationCharacteristics.clear()
+                    }
                     probingAddress = null
                     _uiState.update { it.copy(isConnected = false, statusText = if (wasProbing) "继续扫描…" else "已断开") }
                     if (wasProbing) {
@@ -301,15 +316,23 @@ class RealBleManager(
 
             probingAddress = null
             targetAddress = gatt.device.address
+            expectedAudioPacketSequence = null
+            receivedAudioPacketCount = 0L
+            lostAudioPacketCount = 0L
             audioCharacteristic = service.getCharacteristic(config.audioTxUuid)
             commandCharacteristic = service.getCharacteristic(config.commandTxUuid)
             textRxCharacteristic = service.getCharacteristic(config.textRxUuid)
+            _uiState.update { it.copy(receivedAudioPackets = 0, lostAudioPackets = 0) }
 
             Log.i(TAG, "Services discovered. audioChar=${audioCharacteristic != null}, " +
                 "cmdChar=${commandCharacteristic != null}, textRx=${textRxCharacteristic != null}")
 
-            // Request MTU upgrade
-            gatt.requestMtu(config.mtuRequest)
+            // Request MTU upgrade. If the request cannot be queued, still enable
+            // notifications at the default MTU so audio can start.
+            if (!gatt.requestMtu(config.mtuRequest)) {
+                Log.w(TAG, "requestMtu returned false")
+                enableNotificationsSequentially(listOfNotNull(audioCharacteristic, commandCharacteristic))
+            }
         }
 
         @SuppressLint("MissingPermission")
@@ -318,8 +341,7 @@ class RealBleManager(
             Log.i(TAG, "MTU changed: $mtu")
 
             // After MTU negotiation, enable notifications
-            enableNotification(audioCharacteristic)
-            enableNotification(commandCharacteristic)
+            enableNotificationsSequentially(listOfNotNull(audioCharacteristic, commandCharacteristic))
         }
 
         @SuppressLint("MissingPermission")
@@ -334,14 +356,12 @@ class RealBleManager(
             when (char.uuid) {
                 config.audioTxUuid -> {
                     Log.i(TAG, "Audio notification enabled: $enabled")
-                    if (enabled) {
-                        _uiState.update { it.copy(statusText = "已连接") }
-                    }
                 }
                 config.commandTxUuid -> {
                     Log.i(TAG, "Command notification enabled: $enabled")
                 }
             }
+            writeNextNotificationDescriptor()
         }
 
         override fun onCharacteristicChanged(
@@ -349,26 +369,107 @@ class RealBleManager(
             characteristic: BluetoothGattCharacteristic,
         ) {
             val value = characteristic.value ?: return
-            when (characteristic.uuid) {
-                config.audioTxUuid -> {
-                    eventQueue += BleEvent.AudioPacket(value)
-                }
-                config.commandTxUuid -> {
-                    val command = value.firstOrNull() ?: return
-                    eventQueue += BleEvent.CommandPacket(command)
-                }
-            }
+            handleCharacteristicChanged(characteristic.uuid, value)
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
+            handleCharacteristicChanged(characteristic.uuid, value)
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun enableNotification(characteristic: BluetoothGattCharacteristic?) {
-        if (characteristic == null) return
+    private fun enableNotificationsSequentially(characteristics: List<BluetoothGattCharacteristic>) {
+        synchronized(notificationQueueLock) {
+            pendingNotificationCharacteristics.clear()
+            pendingNotificationCharacteristics.addAll(characteristics)
+        }
+        writeNextNotificationDescriptor()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun writeNextNotificationDescriptor() {
         val gatt = bluetoothGatt ?: return
-        gatt.setCharacteristicNotification(characteristic, true)
-        val descriptor = characteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID) ?: return
+        val characteristic = synchronized(notificationQueueLock) {
+            pendingNotificationCharacteristics.removeFirstOrNull()
+        } ?: run {
+            _uiState.update { it.copy(statusText = "已连接") }
+            return
+        }
+
+        if (!gatt.setCharacteristicNotification(characteristic, true)) {
+            Log.w(TAG, "setCharacteristicNotification failed for ${characteristic.uuid}")
+            writeNextNotificationDescriptor()
+            return
+        }
+
+        val descriptor = characteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID) ?: run {
+            Log.w(TAG, "CCCD missing for ${characteristic.uuid}")
+            writeNextNotificationDescriptor()
+            return
+        }
         descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-        gatt.writeDescriptor(descriptor)
+        if (!gatt.writeDescriptor(descriptor)) {
+            Log.w(TAG, "writeDescriptor returned false for ${characteristic.uuid}")
+            writeNextNotificationDescriptor()
+        }
+    }
+
+    private fun handleCharacteristicChanged(uuid: UUID, value: ByteArray) {
+        when (uuid) {
+            config.audioTxUuid -> {
+                val payload = stripAudioPacketHeader(value)
+                if (payload.isNotEmpty()) {
+                    eventQueue += BleEvent.AudioPacket(payload)
+                }
+            }
+            config.commandTxUuid -> {
+                val command = value.firstOrNull() ?: return
+                eventQueue += BleEvent.CommandPacket(command)
+            }
+        }
+    }
+
+    private fun stripAudioPacketHeader(value: ByteArray): ByteArray {
+        if (value.size >= AUDIO_PACKET_HEADER_BYTES &&
+            value[0] == AUDIO_PACKET_MAGIC_0 &&
+            value[1] == AUDIO_PACKET_MAGIC_1
+        ) {
+            val sequence = (value[2].toInt() and 0xff) or ((value[3].toInt() and 0xff) shl 8)
+            val expected = expectedAudioPacketSequence
+            if (expected != null && sequence != expected) {
+                val lost = (sequence - expected) and 0xffff
+                if (lost > 0) {
+                    lostAudioPacketCount += lost
+                    publishAudioPacketCounters()
+                    Log.w(TAG, "Audio packet gap: expected=$expected actual=$sequence lost=$lost")
+                }
+            }
+            expectedAudioPacketSequence = (sequence + 1) and 0xffff
+            receivedAudioPacketCount += 1
+            if (receivedAudioPacketCount % AUDIO_COUNTER_PUBLISH_INTERVAL == 0L) {
+                publishAudioPacketCounters()
+            }
+            return value.copyOfRange(AUDIO_PACKET_HEADER_BYTES, value.size)
+        }
+
+        receivedAudioPacketCount += 1
+        if (receivedAudioPacketCount % AUDIO_COUNTER_PUBLISH_INTERVAL == 0L) {
+            publishAudioPacketCounters()
+        }
+        return value.copyOf()
+    }
+
+    private fun publishAudioPacketCounters() {
+        _uiState.update {
+            it.copy(
+                receivedAudioPackets = receivedAudioPacketCount,
+                lostAudioPackets = lostAudioPacketCount,
+            )
+        }
     }
 
     private fun emitError(message: String) {
@@ -382,6 +483,10 @@ class RealBleManager(
         private const val FIXED_DEVICE_ADDRESS = "14:C1:9F:26:C5:61"
         private const val SCAN_TIMEOUT_MS = 45_000L
         private const val PROBE_UNMATCHED_SCAN_RESULTS = true
+        private const val AUDIO_PACKET_HEADER_BYTES = 4
+        private const val AUDIO_COUNTER_PUBLISH_INTERVAL = 32L
+        private const val AUDIO_PACKET_MAGIC_0: Byte = 0x48 // H
+        private const val AUDIO_PACKET_MAGIC_1: Byte = 0x47 // G
 
         // Standard CCCD UUID for enabling BLE notifications
         private val CLIENT_CHARACTERISTIC_CONFIG_UUID =

@@ -71,16 +71,10 @@
   - Android 主题入口
 
 ## 无硬件测试方式
-当前默认 `DebugMode.MOCK`，可直接测试：
-- 点击“开启收音”后模拟 BLE 连接成功
-- 模拟收到一组音频包
-- 模拟收到 `END_SPEECH`
-- 触发 partial/final 文本更新
-- 在调试面板查看模式、MTU、包数、最近识别结果
-
-如需切回真实 BLE，只需修改：
-- `app/src/main/java/com/hearglasses/app/di/AppContainer.kt`
-- 将 `debugMode` 从 `DebugMode.MOCK` 改为 `DebugMode.REAL_BLE`
+当前默认 `DebugMode.REAL_BLE`，启动收音后会按旧设备地址
+`14:C1:9F:26:C5:61` 直连开发板，并将 partial/final 转录文本通过
+`Text_RX` 写回屏幕。
+如需无硬件测试，可在极客设置里切换到本地文件或手机麦克风模式。
 
 ## 当前目录结构
 ```text

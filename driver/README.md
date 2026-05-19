@@ -19,6 +19,27 @@ ESP32-S3 without a router.
 
 `L/R` is tied to `GND`, so the sketch reads the left I2S channel.
 
+## I2C OLED wiring
+
+The BLE peripheral sketch can show phone-side transcription text on a common
+128x64 SSD1306 I2C OLED.
+
+| OLED | ESP32-S3 |
+| --- | --- |
+| VCC | 3.3V |
+| GND | GND |
+| SCL | GPIO10 |
+| SDA | GPIO18 |
+
+Install the Arduino `U8g2` library before compiling the BLE peripheral sketch:
+
+```bash
+arduino-cli lib install U8g2
+```
+
+If your display is SH1106 or 128x32 instead of 128x64 SSD1306, change the U8g2
+constructor near the top of `driver/ble_audio_peripheral/ble_audio_peripheral.ino`.
+
 ## Listen on the computer
 
 1. Open `driver/inmp441_capture/inmp441_capture.ino` in Arduino IDE.
@@ -119,4 +140,5 @@ Audio is sent as raw `16000 Hz / mono / signed 16-bit little-endian` PCM over
 BLE notifications. The Android `RealBleManager` is configured to treat hardware
 BLE audio as PCM for this bring-up sketch, and the app plays incoming hardware
 BLE PCM through Android `AudioTrack` while also feeding it into the recognition
-pipeline.
+pipeline. Text received on `Text_RX` is rendered on the I2C OLED with UTF-8
+wrapping for Chinese transcription text.

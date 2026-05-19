@@ -7,6 +7,8 @@ data class BleUiState(
     val statusText: String = "未连接",
     val batteryText: String = "--%",
     val mtu: Int = 23,
+    val receivedAudioPackets: Long = 0,
+    val lostAudioPackets: Long = 0,
 )
 
 sealed interface BleEvent {

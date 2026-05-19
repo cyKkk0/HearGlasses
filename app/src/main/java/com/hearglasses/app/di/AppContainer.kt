@@ -5,6 +5,7 @@ import com.hearglasses.app.asr.SherpaModelConfig
 import com.hearglasses.app.asr.SpeechRecognizerEngine
 import com.hearglasses.app.audio.OpusDecoder
 import com.hearglasses.app.audio.PcmAudioPlayer
+import com.hearglasses.app.audio.PcmAudioRecorder
 import com.hearglasses.app.ble.BleConstants
 import com.hearglasses.app.ble.BleManager
 import com.hearglasses.app.ble.FileBleManager
@@ -65,6 +66,7 @@ class AppContainer(context: Context) {
 
     val opusDecoder = OpusDecoder(sampleRate = 16_000, channelCount = 1)
     val pcmAudioPlayer = PcmAudioPlayer()
+    val pcmAudioRecorder = PcmAudioRecorder(appContext)
 
     private val sherpaModelConfig = SherpaModelConfig(
         model = "sherpa-onnx-streaming-zipformer-ctc-zh-int8-2025-06-30/model.int8.onnx",
@@ -84,9 +86,11 @@ class AppContainer(context: Context) {
     val generation: StateFlow<Int> = _generation.asStateFlow()
 
     private fun createController() = HearGlassesController(
+        context = appContext,
         bleManager = bleManager,
         opusDecoder = opusDecoder,
         pcmAudioPlayer = pcmAudioPlayer,
+        pcmAudioRecorder = pcmAudioRecorder,
         speechRecognizerEngine = speechRecognizerEngine,
     )
 
@@ -97,6 +101,7 @@ class AppContainer(context: Context) {
     fun switchAudioSource(mode: DebugMode) {
         bleManager.disconnect()
         pcmAudioPlayer.stop()
+        pcmAudioRecorder.stop()
         bleManager = createBleManager(mode)
         speechRecognizerEngine = createSpeechRecognizerEngine(_settings.value.vadThreshold)
         controller = createController()

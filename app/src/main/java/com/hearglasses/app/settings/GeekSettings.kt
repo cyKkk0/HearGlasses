@@ -6,7 +6,7 @@ data class GeekSettings(
     val vadThreshold: Float = 0.5f,
     val mtuSize: Int = 512,
     val modelName: String = "zh-streaming-ctc",
-    val debugMode: DebugMode = DebugMode.FILE,
+    val debugMode: DebugMode = DebugMode.REAL_BLE,
     val keepAlive: Boolean = true,
 )
 
