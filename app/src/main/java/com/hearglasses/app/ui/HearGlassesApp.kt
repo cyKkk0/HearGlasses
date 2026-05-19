@@ -2,6 +2,7 @@ package com.hearglasses.app.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -35,6 +37,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +52,11 @@ import com.hearglasses.app.di.AppContainer
 import com.hearglasses.app.service.AppUiState
 import com.hearglasses.app.service.DebugPanelState
 import com.hearglasses.app.service.TranscriptItem
+
+private enum class MainTab {
+    TRANSCRIPT,
+    DEBUG,
+}
 
 @Composable
 fun HearGlassesApp(
@@ -201,6 +209,7 @@ private fun HearGlassesScreen(
     onOpenSettings: () -> Unit,
 ) {
     val latestTranscript = uiState.transcriptItems.lastOrNull()
+    var selectedTab by rememberSaveable { mutableStateOf(MainTab.TRANSCRIPT) }
 
     LaunchedEffect(
         uiState.transcriptItems.size,
@@ -219,15 +228,50 @@ private fun HearGlassesScreen(
             .background(Color.White)
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 24.dp),
+            .padding(horizontal = 20.dp, vertical = 20.dp),
     ) {
+        when (selectedTab) {
+            MainTab.TRANSCRIPT -> TranscriptTab(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                uiState = uiState,
+                listState = listState,
+                onToggleListening = onToggleListening,
+                settingsSummary = settingsSummary,
+                onOpenSettings = onOpenSettings,
+            )
+            MainTab.DEBUG -> DebugTab(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                uiState = uiState,
+                settingsSummary = settingsSummary,
+            )
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        BottomTabs(
+            selectedTab = selectedTab,
+            onSelectTab = { selectedTab = it },
+        )
+    }
+}
+
+@Composable
+private fun TranscriptTab(
+    modifier: Modifier = Modifier,
+    uiState: AppUiState,
+    listState: LazyListState,
+    onToggleListening: () -> Unit,
+    settingsSummary: String,
+    onOpenSettings: () -> Unit,
+) {
+    Column(modifier = modifier) {
         StatusBar(
             connectionText = uiState.connectionText,
             batteryText = uiState.batteryText,
             isConnected = uiState.connectionText.contains("已连接"),
         )
-        Spacer(modifier = Modifier.height(20.dp))
-        DebugPanel(debugPanelState = uiState.debugPanelState)
         Spacer(modifier = Modifier.height(20.dp))
         TranscriptPanel(
             modifier = Modifier
@@ -243,6 +287,79 @@ private fun HearGlassesScreen(
             onToggle = onToggleListening,
             settingsSummary = settingsSummary,
             onOpenSettings = onOpenSettings,
+        )
+    }
+}
+
+@Composable
+private fun DebugTab(
+    modifier: Modifier = Modifier,
+    uiState: AppUiState,
+    settingsSummary: String,
+) {
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        StatusBar(
+            connectionText = uiState.connectionText,
+            batteryText = uiState.batteryText,
+            isConnected = uiState.connectionText.contains("已连接"),
+        )
+        DebugPanel(debugPanelState = uiState.debugPanelState)
+        AppInfoPanel(
+            uiState = uiState,
+            settingsSummary = settingsSummary,
+        )
+        ExtensionPanel()
+    }
+}
+
+@Composable
+private fun BottomTabs(
+    selectedTab: MainTab,
+    onSelectTab: (MainTab) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        BottomTabButton(
+            text = "转录",
+            selected = selectedTab == MainTab.TRANSCRIPT,
+            onClick = { onSelectTab(MainTab.TRANSCRIPT) },
+            modifier = Modifier.weight(1f),
+        )
+        BottomTabButton(
+            text = "主页",
+            selected = selectedTab == MainTab.DEBUG,
+            onClick = { onSelectTab(MainTab.DEBUG) },
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun BottomTabButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .height(56.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) Color(0xFF4CAF50) else Color(0xFFF1F1F1))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            color = if (selected) Color.White else Color(0xFF333333),
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
         )
     }
 }
@@ -286,21 +403,43 @@ private fun StatusBar(
 
 @Composable
 private fun DebugPanel(debugPanelState: DebugPanelState) {
+    var expanded by rememberSaveable { mutableStateOf(true) }
     Card(
         colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F7F7)),
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded },
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = "调试面板",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.Black,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "调试面板",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.Black,
+                )
+                Text(
+                    text = if (expanded) "收起" else "展开",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF4CAF50),
+                )
+            }
+            if (!expanded) {
+                DebugRow(
+                    label = "概览",
+                    value = "${debugPanelState.modeLabel} | ${debugPanelState.latencyInfo.ifBlank { "等待音频" }}",
+                )
+                return@Column
+            }
             DebugRow(label = "模式", value = debugPanelState.modeLabel)
             if (debugPanelState.audioInfo.isNotBlank()) {
                 DebugRow(label = "音频信息", value = debugPanelState.audioInfo)
@@ -320,8 +459,67 @@ private fun DebugPanel(debugPanelState: DebugPanelState) {
             DebugRow(label = "BLE收到包", value = debugPanelState.bleReceivedPackets.toString())
             DebugRow(label = "BLE丢包", value = debugPanelState.bleLostPackets.toString())
             DebugRow(label = "峰值振幅", value = debugPanelState.peakAmplitude.toString())
+            if (debugPanelState.latencyInfo.isNotBlank()) {
+                DebugRow(label = "延迟", value = debugPanelState.latencyInfo)
+            }
+            if (debugPanelState.logFilePath.isNotBlank()) {
+                DebugRow(label = "日志文件", value = debugPanelState.logFilePath)
+            }
             DebugRow(label = "最近 partial", value = debugPanelState.lastPartialText.ifBlank { "-" })
             DebugRow(label = "最近 final", value = debugPanelState.lastFinalText.ifBlank { "-" })
+        }
+    }
+}
+
+@Composable
+private fun AppInfoPanel(
+    uiState: AppUiState,
+    settingsSummary: String,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F7F7)),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "应用信息",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.Black,
+            )
+            DebugRow(label = "连接", value = uiState.connectionText)
+            DebugRow(label = "电量", value = uiState.batteryText)
+            DebugRow(label = "收音", value = if (uiState.isListening) "进行中" else "已停止")
+            DebugRow(label = "设置", value = settingsSummary)
+            DebugRow(label = "转录条目", value = uiState.transcriptItems.size.toString())
+        }
+    }
+}
+
+@Composable
+private fun ExtensionPanel() {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F7F7)),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "扩展",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.Black,
+            )
+            DebugRow(label = "功能区 A", value = "预留")
+            DebugRow(label = "功能区 B", value = "预留")
+            DebugRow(label = "功能区 C", value = "预留")
         }
     }
 }
@@ -343,7 +541,9 @@ private fun DebugRow(label: String, value: String) {
             color = Color.Black,
             fontSize = 14.sp,
             textAlign = TextAlign.End,
-            modifier = Modifier.padding(start = 16.dp),
+            modifier = Modifier
+                .padding(start = 16.dp)
+                .weight(1f),
         )
     }
 }

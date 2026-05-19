@@ -1,139 +1,228 @@
 # HearGlasses
 
-`HearGlasses` 当前是一个基于 Android Studio 的 Android 端 MVP 工程骨架，目标是连接眼镜端 ESP32 设备，通过 BLE 接收 Opus 音频流、在手机端完成语音识别，并将识别文本回写到眼镜端显示。
+HearGlasses 是一个面向听障辅助眼镜的端到端原型项目。当前链路为：
 
-## 当前功能目标
-- 与眼镜端 ESP32-S3 建立 BLE 通信
-- 接收 `Audio_TX` 音频数据与 `Command_TX` 控制指令
-- 在手机端完成 Opus 解码
-- 将 PCM 数据送入本地 ASR 引擎
-- 在收到句末命令后输出最终识别文本
-- 通过 `Text_RX` 将文本写回眼镜显示
-- 在手机界面展示连接状态、电量、实时转写和收音控制
+```text
+ESP32-S3 眼镜端采集麦克风音频
+  -> BLE 发送 Opus 音频到 Android 手机
+  -> 手机端解码并进行本地流式 ASR
+  -> 手机端将 partial/final 文字通过 BLE 写回硬件
+  -> OLED 屏幕显示转录内容
+```
 
-## 当前代码功能框架
+项目同时包含 Android 应用、ESP32-S3 固件、调试工具与原型文档。
 
-### 1. 应用入口层
-- `app/src/main/java/com/hearglasses/app/MainActivity.kt`
-  - 应用入口
-  - 申请蓝牙与通知权限
-  - 初始化依赖容器
-  - 挂载 Compose 主界面
+## 当前功能
 
-### 2. 依赖装配层
-- `app/src/main/java/com/hearglasses/app/di/AppContainer.kt`
-  - 统一创建并管理 `BleManager`、`OpusDecoder`、`SpeechRecognizerEngine`、`HearGlassesController`
-  - 内置 `DebugMode`，当前默认走 `MOCK` 模式，便于无硬件联调
+- Android 手机端
+  - 通过 BLE 连接 HearGlasses 硬件。
+  - 接收硬件端 `Audio_TX` 音频通知和 `Command_TX` 控制通知。
+  - 使用 Concentus 解码 Opus 音频，统一送入 16kHz mono PCM 处理链路。
+  - 使用 sherpa-onnx 在线流式中文 CTC 模型做本地语音识别。
+  - 支持 partial 文本低延迟写回和 final 文本分片写回。
+  - 支持前台服务，用于持续收音和通知栏状态展示。
+  - 支持本地文件、手机麦克风、真实 BLE 三种音频源模式。
+  - 支持日志写入 app 私有目录，记录 BLE 状态、ASR 延迟、写屏动作、错误等信息。
+  - 主界面底部双 tab：
+    - `转录`：显示转录文字、开始/停止收音按钮、设置按钮。
+    - `调试`：上下滑动显示调试信息、应用信息和预留扩展区域。
 
-### 3. BLE 通信层
-- `app/src/main/java/com/hearglasses/app/ble/BleConstants.kt`
-  - 定义 MVP 阶段使用的 BLE Service / Characteristic UUID
-  - 定义 `START_SPEECH` 与 `END_SPEECH` 指令常量
-- `app/src/main/java/com/hearglasses/app/ble/BleManager.kt`
-  - 抽象 BLE 能力接口
-  - 定义 `BleUiState` 和 `BleEvent`
-- `app/src/main/java/com/hearglasses/app/ble/MockBleManager.kt`
-  - 模拟 BLE 连接成功、MTU、音频包输入、句末命令、文本回写
-  - 用于无硬件情况下验证业务流和 UI
-- `app/src/main/java/com/hearglasses/app/ble/RealBleManager.kt`
-  - 真实 BLE 管理骨架
-  - 预留 GATT 连接、MTU 请求、特征监听与写回逻辑
+- ESP32-S3 硬件端
+  - 使用 INMP441 采集 16kHz mono 音频。
+  - 使用 Opus 40ms frame 编码后通过 BLE notification 发送。
+  - 接收手机端写回的 UTF-8 文本。
+  - 使用 SSD1306 128x64 I2C OLED 显示状态和转录文字。
+  - 对 OLED 刷新、BLE 连接参数、音频队列做了低延迟调优。
 
-### 4. 音频处理层
-- `app/src/main/java/com/hearglasses/app/audio/OpusDecoder.kt`
-  - Opus 解码器接口占位
-  - 后续替换为真实 JNI/JNA 或纯 Kotlin 解码实现
+## 项目结构
 
-### 5. 识别引擎层
-- `app/src/main/java/com/hearglasses/app/asr/SpeechRecognizerEngine.kt`
-  - 流式识别引擎占位
-  - 提供 `acceptWaveform()` 与 `forceFinalize()` 两类接口
-  - 后续用于接入 Sherpa-onnx 与 endpoint 检测逻辑
-
-### 6. 状态协调与业务编排层
-- `app/src/main/java/com/hearglasses/app/service/HearGlassesController.kt`
-  - 聚合 BLE、Opus、ASR 三层能力
-  - 管理 UI 状态 `AppUiState`
-  - 负责收音启停、识别结果流转、实时文本列表更新
-  - 当前已加入调试面板状态，支持展示模式、MTU、包数、partial/final 文本
-- `app/src/main/java/com/hearglasses/app/service/HearGlassesService.kt`
-  - 前台服务骨架
-  - 为后续后台保活、蓝牙常驻连接、持续识别提供承载点
-
-### 7. UI 展示层
-- `app/src/main/java/com/hearglasses/app/ui/HearGlassesApp.kt`
-  - 使用 Jetpack Compose 还原 `ui.html` 中的主界面结构
-  - 包含顶部状态栏、调试面板、实时字幕区、主控制按钮、设置摘要区
-  - 当前可直接在无硬件下观察 mock 模式的链路结果
-- `app/src/main/java/com/hearglasses/app/ui/theme/Theme.kt`
-  - 定义应用浅色主题色板
-- `app/src/main/res/values/themes.xml`
-  - Android 主题入口
-
-## 无硬件测试方式
-当前默认 `DebugMode.REAL_BLE`，启动收音后会按旧设备地址
-`14:C1:9F:26:C5:61` 直连开发板，并将 partial/final 转录文本通过
-`Text_RX` 写回屏幕。
-如需无硬件测试，可在极客设置里切换到本地文件或手机麦克风模式。
-
-## 当前目录结构
 ```text
 HearGlasses/
 ├── app/
 │   ├── build.gradle.kts
 │   └── src/main/
 │       ├── AndroidManifest.xml
+│       ├── assets/
+│       │   ├── sample_audio.wav
+│       │   ├── sample_transcript.txt
+│       │   ├── sherpa-onnx-streaming-ctc-zh/
+│       │   └── sherpa-onnx-streaming-zipformer-ctc-zh-int8-2025-06-30/
 │       ├── java/com/hearglasses/app/
 │       │   ├── MainActivity.kt
 │       │   ├── asr/
 │       │   ├── audio/
 │       │   ├── ble/
 │       │   ├── di/
+│       │   ├── logging/
 │       │   ├── service/
+│       │   ├── settings/
 │       │   └── ui/
-│       └── res/values/themes.xml
-├── build.gradle.kts
-├── gradle.properties
-├── settings.gradle.kts
+│       └── res/values/
+├── driver/
+│   ├── ble_audio_peripheral/
+│   ├── inmp441_capture/
+│   ├── wifi_ap_phone/
+│   └── oled_*_test/
+├── tools/
 ├── prototype.md
-└── ui.html
+├── ui.html
+├── build.gradle.kts
+├── settings.gradle.kts
+└── README.md
 ```
 
-## 当前状态
-已完成：
-- Android Studio 项目初始化
-- Compose 主界面骨架搭建
-- BLE / Opus / ASR / Controller / Service 分层落位
-- Mock BLE 与调试面板接入
-- File 音频模式输入接入
-- Sherpa-onnx Android 识别骨架接入（依赖 + 配置 + 运行时降级）
-- README 与工程结构整理
+## Android 端模块
 
-未完成：
-- 真实 BLE 扫描与设备连接
-- GATT 服务发现与特征订阅
-- Opus 真正解码
-- Sherpa-onnx 模型文件落地与真机识别验证
-- 前台服务与 UI 的正式联动
-- 眼镜端文本回写闭环验证
+- `MainActivity.kt`
+  - 应用入口。
+  - 申请蓝牙、录音、通知等运行时权限。
+  - 初始化依赖容器并挂载 Compose UI。
 
-## Sherpa-onnx 接入说明
-当前已接入 `com.bihe0832.android:lib-sherpa-onnx:8.5.1`，并在 `SpeechRecognizerEngine` 中优先尝试初始化在线流式识别器。
+- `di/AppContainer.kt`
+  - 统一创建 `BleManager`、`OpusDecoder`、`PcmAudioRecorder`、`SpeechRecognizerEngine`、`AppLogger` 和 `HearGlassesController`。
+  - 管理调试音频源切换。
 
-默认模型目录约定：
-- `app/src/main/assets/sherpa-onnx-streaming-zipformer-zh/encoder.onnx`
-- `app/src/main/assets/sherpa-onnx-streaming-zipformer-zh/decoder.onnx`
-- `app/src/main/assets/sherpa-onnx-streaming-zipformer-zh/joiner.onnx`
-- `app/src/main/assets/sherpa-onnx-streaming-zipformer-zh/tokens.txt`
+- `ble/`
+  - `BleConstants.kt`：定义 Service / Characteristic UUID、MTU 请求值和控制指令。
+  - `BleManager.kt`：抽象 BLE 事件、状态和写回接口。
+  - `RealBleManager.kt`：真实 BLE 扫描、直连、GATT 服务发现、通知订阅、文本写回。
+  - `FileBleManager.kt`：读取 assets 中的 wav 文件做离线链路验证。
+  - `MicBleManager.kt`：使用手机麦克风做本地链路验证。
+  - `MockBleManager.kt`：保留 mock 输入，便于 UI/业务流调试。
 
-如果这些模型文件不存在：
-- 应用不会直接崩溃
-- 会自动降级回当前的 Mock ASR 输出逻辑
+- `audio/`
+  - `OpusDecoder.kt`：基于 Concentus 解码硬件端 Opus 包。
+  - `PcmAudioPlayer.kt`：可选播放收到的 PCM。
+  - `PcmAudioRecorder.kt`：将链路中的 PCM 保存为调试录音文件。
 
-建议你下一步手动放入一套可用的 sherpa-onnx streaming transducer 中文模型，再用 `DebugMode.FILE` 验证整条链路。
+- `asr/SpeechRecognizerEngine.kt`
+  - 使用 `com.bihe0832.android:lib-sherpa-onnx` 初始化在线识别器。
+  - 默认加载 `sherpa-onnx-streaming-zipformer-ctc-zh-int8-2025-06-30/model.int8.onnx` 和 `tokens.txt`。
+  - 支持 endpoint 检测，VAD 阈值会影响静音判停速度。
+  - 模型初始化失败时回退到 mock ASR，避免应用崩溃。
 
-## 建议下一步
-1. 放入真实 sherpa-onnx streaming 模型文件
-2. 将 File 模式的 wav 输入与 sherpa-onnx 结果联调验证
-3. 接入真实 Opus 解码器
-4. 将控制器迁移为 `ViewModel + ForegroundService` 协同架构
+- `service/`
+  - `HearGlassesController.kt`：核心业务编排，负责 BLE 事件消费、音频缓冲、ASR 分块、转录列表、写屏节流、延迟统计和日志记录。
+  - `HearGlassesService.kt`：前台服务，用于后台持续收音和通知栏状态更新。
+
+- `logging/AppLogger.kt`
+  - 每次 app 会话创建一个日志文件。
+  - 日志目录位于 app 私有目录：`files/logs/hearglasses-yyyyMMdd-HHmmss.log`。
+  - 记录启动/停止、BLE 状态、ASR chunk、partial/final 文本、写屏动作、周期性调试快照和错误。
+
+- `settings/GeekSettings.kt`
+  - 管理调试模式、VAD 阈值、MTU、模型选项等极客设置。
+
+- `ui/`
+  - `HearGlassesApp.kt`：Compose 主界面，底部双 tab 布局。
+  - `GeekSettingsDialog.kt`：调试设置弹窗。
+  - `theme/Theme.kt`：应用主题。
+
+## BLE 协议
+
+默认 Service UUID：
+
+```text
+Service:    000018fd-0000-1000-8000-00805f9b34fb
+Audio_TX:   00002a3d-0000-1000-8000-00805f9b34fb  notify
+Command_TX: 00002a3e-0000-1000-8000-00805f9b34fb  notify
+Text_RX:    00002a3f-0000-1000-8000-00805f9b34fb  write / write no response
+```
+
+控制指令：
+
+```text
+0x01 START_SPEECH
+0x00 END_SPEECH
+```
+
+手机写回硬件显示的文本命令：
+
+```text
+@STATUS <status text>
+@TEXT <partial text>
+@TEXTF <final first chunk>
+@TEXTA <final append chunk>
+@COMMIT
+@CLEAR
+```
+
+## 低延迟优化
+
+当前已做的主要优化：
+
+- Android 端 ASR 分块从 100ms 降到 40ms，贴近硬件 Opus frame。
+- Android 端 BLE 事件轮询从 20ms 降到 10ms。
+- partial 文本写屏节流从 2s 降到 350ms。
+- Sherpa endpoint 静音判停使用 VAD 阈值动态调整。
+- ESP32-S3 OLED 刷新间隔从 1000ms 降到 150ms。
+- 调试面板显示 `音频->ASR / ASR / 写屏` 延迟拆分。
+- 日志文件记录每个 ASR chunk 的耗时，便于实测定位瓶颈。
+
+## 硬件固件
+
+主固件：
+
+```text
+driver/ble_audio_peripheral/ble_audio_peripheral.ino
+```
+
+辅助固件：
+
+- `driver/inmp441_capture/`：INMP441 采集调试。
+- `driver/wifi_ap_phone/`：ESP32-S3 Wi-Fi AP 手机连接实验。
+- `driver/oled_*_test/`：OLED 连线、地址、对比度和全屏显示测试。
+
+硬件连接说明见：
+
+```text
+driver/README.md
+```
+
+## 编译与运行
+
+Android debug 包：
+
+```bash
+JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" ./gradlew :app:assembleDebug
+```
+
+生成位置：
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+ESP32-S3 固件编译：
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32s3 driver/ble_audio_peripheral
+```
+
+ESP32-S3 固件上传：
+
+```bash
+arduino-cli upload --fqbn esp32:esp32:esp32s3 --port /dev/cu.usbmodem5C371873961 driver/ble_audio_peripheral
+```
+
+如果端口不同，先查看：
+
+```bash
+arduino-cli board list
+```
+
+## 调试建议
+
+1. 优先用 `手机麦克风` 或 `本地文件` 模式确认 ASR 和 UI 正常。
+2. 再切换到 `硬件 BLE` 模式确认 BLE 连接、音频包数和丢包数。
+3. 观察调试 tab 中的延迟拆分：
+   - `音频->ASR` 高：说明 BLE 队列、音频缓冲或轮询有积压。
+   - `ASR` 高：说明模型推理耗时较长。
+   - `写屏` 高或屏幕慢：检查 BLE 写回和 OLED 刷新。
+4. 查看 app 私有目录下的日志文件，确认每次运行的关键事件和耗时。
+
+## TODO
+
+1. 增加声纹识别功能。
+2. 增加一键跳转日志文件界面功能。
+3. 考虑如何实现硬件连接手机热点，更新固件。

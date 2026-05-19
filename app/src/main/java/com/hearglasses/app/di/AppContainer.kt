@@ -11,6 +11,7 @@ import com.hearglasses.app.ble.BleManager
 import com.hearglasses.app.ble.FileBleManager
 import com.hearglasses.app.ble.MicBleManager
 import com.hearglasses.app.ble.RealBleManager
+import com.hearglasses.app.logging.AppLogger
 import com.hearglasses.app.service.HearGlassesController
 import com.hearglasses.app.settings.GeekSettings
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,6 +68,7 @@ class AppContainer(context: Context) {
     val opusDecoder = OpusDecoder(sampleRate = 16_000, channelCount = 1)
     val pcmAudioPlayer = PcmAudioPlayer()
     val pcmAudioRecorder = PcmAudioRecorder(appContext)
+    val appLogger = AppLogger(appContext)
 
     private val sherpaModelConfig = SherpaModelConfig(
         model = "sherpa-onnx-streaming-zipformer-ctc-zh-int8-2025-06-30/model.int8.onnx",
@@ -92,6 +94,7 @@ class AppContainer(context: Context) {
         pcmAudioPlayer = pcmAudioPlayer,
         pcmAudioRecorder = pcmAudioRecorder,
         speechRecognizerEngine = speechRecognizerEngine,
+        appLogger = appLogger,
     )
 
     /**

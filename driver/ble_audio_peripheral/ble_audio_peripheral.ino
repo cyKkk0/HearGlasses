@@ -86,7 +86,7 @@ static constexpr uint32_t BLE_AUDIO_NOTIFY_GAP_MS = 1;
 static constexpr size_t BLE_AUDIO_HEADER_BYTES = 4;
 static constexpr uint8_t BLE_AUDIO_MAGIC_0 = 'H';
 static constexpr uint8_t BLE_AUDIO_MAGIC_1 = 'G';
-static constexpr uint32_t DISPLAY_RENDER_INTERVAL_MS = 1000;
+static constexpr uint32_t DISPLAY_RENDER_INTERVAL_MS = 150;
 
 static constexpr i2s_port_t I2S_PORT = I2S_NUM_0;
 
@@ -869,7 +869,7 @@ static void displayTask(void *param)
   Serial.println("display task started");
   while (true) {
     serviceDisplayRender(false);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 

@@ -12,7 +12,10 @@ data class BleUiState(
 )
 
 sealed interface BleEvent {
-    data class AudioPacket(val bytes: ByteArray) : BleEvent
+    data class AudioPacket(
+        val bytes: ByteArray,
+        val receivedElapsedRealtimeMillis: Long = android.os.SystemClock.elapsedRealtime(),
+    ) : BleEvent
     data class CommandPacket(val command: Byte) : BleEvent
     data class Error(val message: String) : BleEvent
 }

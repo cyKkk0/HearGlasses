@@ -3,6 +3,7 @@ package com.hearglasses.app.asr
 import android.content.Context
 import android.util.Log
 import com.k2fsa.sherpa.onnx.EndpointConfig
+import com.k2fsa.sherpa.onnx.EndpointRule
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
@@ -67,7 +68,7 @@ class SpeechRecognizerEngine(
                             tokens = modelConfig.tokens,
                             numThreads = modelConfig.numThreads,
                         ),
-                        endpointConfig = EndpointConfig(),
+                        endpointConfig = buildEndpointConfig(),
                         enableEndpoint = true,
                         decodingMethod = modelConfig.decodingMethod,
                         maxActivePaths = 4,
@@ -176,6 +177,27 @@ class SpeechRecognizerEngine(
         utteranceIndex += 1
         fallbackEnergy = 0f
         return RecognitionResult(finalText = sentence, isEndpoint = true)
+    }
+
+    private fun buildEndpointConfig(): EndpointConfig {
+        val speechEndSilence = (0.4f + vadThreshold * 1.2f).coerceIn(0.45f, 1.4f)
+        return EndpointConfig(
+            rule1 = EndpointRule(
+                mustContainNonSilence = false,
+                minTrailingSilence = speechEndSilence + 0.35f,
+                minUtteranceLength = 0.0f,
+            ),
+            rule2 = EndpointRule(
+                mustContainNonSilence = true,
+                minTrailingSilence = speechEndSilence,
+                minUtteranceLength = 0.0f,
+            ),
+            rule3 = EndpointRule(
+                mustContainNonSilence = false,
+                minTrailingSilence = 0.0f,
+                minUtteranceLength = 12.0f,
+            ),
+        )
     }
 
     private companion object {

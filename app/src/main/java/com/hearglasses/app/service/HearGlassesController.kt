@@ -2,6 +2,7 @@ package com.hearglasses.app.service
 
 import android.content.Context
 import android.os.BatteryManager
+import android.os.SystemClock
 import com.hearglasses.app.asr.RecognitionResult
 import com.hearglasses.app.asr.SpeechRecognizerEngine
 import com.hearglasses.app.audio.OpusDecoder
@@ -10,6 +11,7 @@ import com.hearglasses.app.audio.PcmAudioRecorder
 import com.hearglasses.app.ble.BleConstants
 import com.hearglasses.app.ble.BleEvent
 import com.hearglasses.app.ble.BleManager
+import com.hearglasses.app.logging.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,9 +43,27 @@ data class DebugPanelState(
     val bleReceivedPackets: Long = 0,
     val bleLostPackets: Long = 0,
     val peakAmplitude: Int = 0,
+    val latencyInfo: String = "",
+    val logFilePath: String = "",
     val lastPartialText: String = "",
     val lastFinalText: String = "",
     val recordingInfo: String = "",
+)
+
+private data class PendingAudioChunk(
+    val samples: ShortArray,
+    val receivedElapsedRealtimeMillis: Long,
+)
+
+private data class ReadyAudioChunk(
+    val samples: ShortArray,
+    val packetCount: Int,
+    val oldestPacketElapsedRealtimeMillis: Long,
+)
+
+private data class DisplayWriteResult(
+    val didWrite: Boolean,
+    val durationMillis: Long,
 )
 
 data class AppUiState(
@@ -63,34 +83,46 @@ class HearGlassesController(
     private val pcmAudioPlayer: PcmAudioPlayer,
     private val pcmAudioRecorder: PcmAudioRecorder,
     private val speechRecognizerEngine: SpeechRecognizerEngine,
+    private val appLogger: AppLogger,
 ) {
     private val appContext = context.applicationContext
     private var nextId = 0L
     private var pollingJob: Job? = null
     private val controllerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val audioBufferLock = Any()
-    private val pendingAudioChunks = ArrayDeque<ShortArray>()
+    private val pendingAudioChunks = ArrayDeque<PendingAudioChunk>()
     private var pendingAudioSampleCount = 0
     private var pendingAudioPacketCount = 0
     private var lastBleDisplayText = ""
     private var lastBleDisplayWriteMillis = 0L
     private var lastBleStatusWriteMillis = 0L
+    private var lastLoggedBleStatusText = ""
+    private var lastDebugSnapshotLogMillis = 0L
 
     private val _uiState = MutableStateFlow(
         AppUiState(
             debugPanelState = DebugPanelState(
                 modeLabel = bleManager.modeLabel,
+                logFilePath = appLogger.logFilePath,
             ),
         ),
     )
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
 
     init {
+        appLogger.info(
+            "controller_init",
+            "mode=${bleManager.modeLabel} audio=${bleManager.audioInfo.ifBlank { "-" }}",
+        )
         syncBleState()
     }
 
     fun startListening() {
         if (_uiState.value.isListening) return
+        appLogger.info(
+            "start_listening",
+            "mode=${bleManager.modeLabel} sampleRate=${bleManager.audioSampleRate} audio=${bleManager.audioInfo.ifBlank { "-" }}",
+        )
         bleManager.connect()
         if (bleManager.playIncomingPcm) {
             pcmAudioPlayer.start(bleManager.audioSampleRate)
@@ -109,8 +141,10 @@ class HearGlassesController(
                     bleReceivedPackets = 0,
                     bleLostPackets = 0,
                     peakAmplitude = 0,
+                    latencyInfo = "",
                     lastPartialText = "",
                     lastFinalText = "",
+                    logFilePath = appLogger.logFilePath,
                 ),
             )
         }
@@ -119,6 +153,7 @@ class HearGlassesController(
 
     fun stopListening() {
         if (!_uiState.value.isListening) return
+        appLogger.info("stop_listening")
         _uiState.update {
             it.copy(
                 isListening = false,
@@ -150,9 +185,10 @@ class HearGlassesController(
         events.forEach { event ->
             when (event) {
                 is BleEvent.AudioPacket -> {
-                    appendAudioPacket(event.bytes)
+                    appendAudioPacket(event.bytes, event.receivedElapsedRealtimeMillis)
                 }
                 is BleEvent.CommandPacket -> {
+                    appLogger.info("ble_command", "command=${event.command}")
                     if (event.command == BleConstants.COMMAND_END_SPEECH) {
                         processReadyAudioChunks(force = true)
                         val result = speechRecognizerEngine.forceFinalize()
@@ -160,6 +196,7 @@ class HearGlassesController(
                     }
                 }
                 is BleEvent.Error -> {
+                    appLogger.error("ble_error", event.message)
                     _uiState.update { it.copy(connectionText = event.message) }
                 }
             }
@@ -175,6 +212,13 @@ class HearGlassesController(
 
     private fun syncBleState() {
         val bleState = bleManager.uiState.value
+        if (bleState.statusText != lastLoggedBleStatusText) {
+            lastLoggedBleStatusText = bleState.statusText
+            appLogger.info(
+                "ble_state",
+                "status=${bleState.statusText} connected=${bleState.isConnected} mtu=${bleState.mtu}",
+            )
+        }
         _uiState.update {
             it.copy(
                 connectionText = bleState.statusText,
@@ -187,9 +231,11 @@ class HearGlassesController(
                     mtu = bleState.mtu,
                     bleReceivedPackets = bleState.receivedAudioPackets,
                     bleLostPackets = bleState.lostAudioPackets,
+                    logFilePath = appLogger.logFilePath,
                 ),
             )
         }
+        logDebugSnapshotIfNeeded(bleState.receivedAudioPackets, bleState.lostAudioPackets)
     }
 
     private fun startPolling() {
@@ -213,6 +259,7 @@ class HearGlassesController(
         if (result.finalText.isBlank()) {
             return
         }
+        appLogger.info("asr_final", "text=${result.finalText}")
         pushTranscript(result.finalText, active = false, replaceActive = true)
         writeDisplayText(result.finalText, force = true)
         _uiState.update {
@@ -284,7 +331,7 @@ class HearGlassesController(
         return shorts
     }
 
-    private fun appendAudioPacket(bytes: ByteArray) {
+    private fun appendAudioPacket(bytes: ByteArray, receivedElapsedRealtimeMillis: Long) {
         val decoded = if (bleManager.isAudioPcm) {
             pcmBytesToShortArray(bytes)
         } else {
@@ -300,7 +347,12 @@ class HearGlassesController(
         pcmAudioRecorder.write(decoded)
 
         synchronized(audioBufferLock) {
-            pendingAudioChunks.addLast(decoded)
+            pendingAudioChunks.addLast(
+                PendingAudioChunk(
+                    samples = decoded,
+                    receivedElapsedRealtimeMillis = receivedElapsedRealtimeMillis,
+                ),
+            )
             pendingAudioSampleCount += decoded.size
             pendingAudioPacketCount += 1
             dropStaleAudioBacklogLocked()
@@ -318,7 +370,8 @@ class HearGlassesController(
     private fun dropStaleAudioBacklogLocked() {
         while (pendingAudioSampleCount > MAX_AUDIO_BACKLOG_SAMPLES && pendingAudioChunks.isNotEmpty()) {
             val dropped = pendingAudioChunks.removeFirst()
-            pendingAudioSampleCount -= dropped.size
+            pendingAudioSampleCount -= dropped.samples.size
+            appLogger.warn("audio_backlog_drop", "samples=${dropped.samples.size} remaining=$pendingAudioSampleCount")
         }
     }
 
@@ -332,14 +385,21 @@ class HearGlassesController(
                         ASR_CHUNK_SAMPLES
                     }
                     val packetCount = pendingAudioPacketCount
+                    val oldestPacketElapsedRealtimeMillis = pendingAudioChunks.firstOrNull()
+                        ?.receivedElapsedRealtimeMillis
+                        ?: SystemClock.elapsedRealtime()
                     pendingAudioPacketCount = 0
-                    takeAudioSamplesLocked(sampleCount) to packetCount
+                    ReadyAudioChunk(
+                        samples = takeAudioSamplesLocked(sampleCount),
+                        packetCount = packetCount,
+                        oldestPacketElapsedRealtimeMillis = oldestPacketElapsedRealtimeMillis,
+                    )
                 } else {
                     null
                 }
             } ?: return
 
-            processAudioChunk(nextChunk.first, nextChunk.second)
+            processAudioChunk(nextChunk)
         }
     }
 
@@ -348,45 +408,62 @@ class HearGlassesController(
         var copied = 0
         while (copied < sampleCount && pendingAudioChunks.isNotEmpty()) {
             val chunk = pendingAudioChunks.removeFirst()
-            val samplesToCopy = minOf(chunk.size, sampleCount - copied)
-            chunk.copyInto(output, destinationOffset = copied, endIndex = samplesToCopy)
+            val samples = chunk.samples
+            val samplesToCopy = minOf(samples.size, sampleCount - copied)
+            samples.copyInto(output, destinationOffset = copied, endIndex = samplesToCopy)
             copied += samplesToCopy
 
-            if (samplesToCopy < chunk.size) {
-                pendingAudioChunks.addFirst(chunk.copyOfRange(samplesToCopy, chunk.size))
+            if (samplesToCopy < samples.size) {
+                pendingAudioChunks.addFirst(
+                    chunk.copy(samples = samples.copyOfRange(samplesToCopy, samples.size)),
+                )
             }
             pendingAudioSampleCount -= samplesToCopy
         }
         return output
     }
 
-    private fun processAudioChunk(samples: ShortArray, packetCount: Int) {
+    private fun processAudioChunk(chunk: ReadyAudioChunk) {
+        val samples = chunk.samples
         if (samples.isEmpty() || !_uiState.value.isListening) {
             return
         }
 
+        val asrStartMillis = SystemClock.elapsedRealtime()
+        val audioToAsrMillis = asrStartMillis - chunk.oldestPacketElapsedRealtimeMillis
         val peak = samples.maxOfOrNull { kotlin.math.abs(it.toInt()) } ?: 0
         val result = speechRecognizerEngine.acceptWaveform(
             samples,
             audioSampleRate = bleManager.audioSampleRate,
         )
+        val asrMillis = SystemClock.elapsedRealtime() - asrStartMillis
         if (!_uiState.value.isListening) {
             return
         }
+        val displayWriteResult = if (result.partialText.isNotBlank()) {
+            pushTranscript(result.partialText, active = true, replaceActive = true)
+            writeDisplayText(result.partialText, force = false)
+        } else {
+            DisplayWriteResult(didWrite = false, durationMillis = 0L)
+        }
+        appLogger.info(
+            "asr_chunk",
+            "packets=${chunk.packetCount} samples=${samples.size} peak=$peak " +
+                "audioToAsr=${audioToAsrMillis}ms asr=${asrMillis}ms " +
+                "displayWrite=${displayWriteResult.durationMillis}ms wrote=${displayWriteResult.didWrite} " +
+                "endpoint=${result.isEndpoint} partial=${result.partialText}",
+        )
         _uiState.update {
             it.copy(
                 debugPanelState = it.debugPanelState.copy(
                     asrMode = speechRecognizerEngine.modeLabel,
                     asrInitError = speechRecognizerEngine.fullInitError() ?: "",
-                    packetCount = it.debugPanelState.packetCount + packetCount,
+                    packetCount = it.debugPanelState.packetCount + chunk.packetCount,
                     peakAmplitude = maxOf(it.debugPanelState.peakAmplitude, peak),
+                    latencyInfo = buildLatencyInfo(audioToAsrMillis, asrMillis, displayWriteResult),
                     lastPartialText = result.partialText,
                 ),
             )
-        }
-        if (result.partialText.isNotBlank()) {
-            pushTranscript(result.partialText, active = true, replaceActive = true)
-            writeDisplayText(result.partialText, force = false)
         }
         if (result.isEndpoint) {
             val finalResult = speechRecognizerEngine.forceFinalize()
@@ -396,14 +473,28 @@ class HearGlassesController(
                 finalizeActiveTranscript()
                 commitDisplayText()
                 speechRecognizerEngine.resetStream()
+                appLogger.info("asr_endpoint_empty_final")
             }
         }
     }
 
-    private fun writeDisplayText(text: String, force: Boolean) {
+    private fun buildLatencyInfo(
+        audioToAsrMillis: Long,
+        asrMillis: Long,
+        displayWriteResult: DisplayWriteResult,
+    ): String {
+        val writeText = if (displayWriteResult.didWrite) {
+            "${displayWriteResult.durationMillis}ms"
+        } else {
+            "跳过"
+        }
+        return "音频->ASR ${audioToAsrMillis}ms / ASR ${asrMillis}ms / 写屏 $writeText"
+    }
+
+    private fun writeDisplayText(text: String, force: Boolean): DisplayWriteResult {
         val normalizedText = text.trim()
         if (normalizedText.isBlank()) {
-            return
+            return DisplayWriteResult(didWrite = false, durationMillis = 0L)
         }
 
         val now = System.currentTimeMillis()
@@ -412,7 +503,7 @@ class HearGlassesController(
                     now - lastBleDisplayWriteMillis < PARTIAL_TEXT_WRITE_INTERVAL_MILLIS
                 )
         ) {
-            return
+            return DisplayWriteResult(didWrite = false, durationMillis = 0L)
         }
 
         lastBleDisplayText = normalizedText
@@ -421,11 +512,21 @@ class HearGlassesController(
             text = normalizedText,
             maxChars = if (force) MAX_FINAL_DISPLAY_TEXT_CHARS else MAX_PARTIAL_DISPLAY_TEXT_CHARS,
         )
+        val writeStartMillis = SystemClock.elapsedRealtime()
         if (force) {
             writeDisplayTextChunks(displayText)
         } else {
             bleManager.writeText("$TEXT_PREFIX$displayText")
         }
+        val durationMillis = SystemClock.elapsedRealtime() - writeStartMillis
+        appLogger.info(
+            "display_text_write",
+            "force=$force duration=${durationMillis}ms chars=${displayText.length} text=$displayText",
+        )
+        return DisplayWriteResult(
+            didWrite = true,
+            durationMillis = durationMillis,
+        )
     }
 
     private fun writeDisplayTextChunks(text: String) {
@@ -470,6 +571,7 @@ class HearGlassesController(
             return
         }
         bleManager.writeText(COMMIT_TEXT_COMMAND)
+        appLogger.info("display_text_commit")
         lastBleDisplayText = ""
     }
 
@@ -510,7 +612,24 @@ class HearGlassesController(
         }
 
         lastBleStatusWriteMillis = now
-        bleManager.writeText("$STATUS_PREFIX${buildDisplayStatusText()}")
+        val statusText = buildDisplayStatusText()
+        bleManager.writeText("$STATUS_PREFIX$statusText")
+        appLogger.info("display_status_write", statusText)
+    }
+
+    private fun logDebugSnapshotIfNeeded(receivedAudioPackets: Long, lostAudioPackets: Long) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDebugSnapshotLogMillis < DEBUG_SNAPSHOT_LOG_INTERVAL_MILLIS) {
+            return
+        }
+        lastDebugSnapshotLogMillis = now
+        val debug = _uiState.value.debugPanelState
+        appLogger.info(
+            "debug_snapshot",
+            "mode=${debug.modeLabel} asr=${debug.asrMode} mtu=${debug.mtu} " +
+                "packets=${debug.packetCount} bleReceived=$receivedAudioPackets bleLost=$lostAudioPackets " +
+                "peak=${debug.peakAmplitude} latency=${debug.latencyInfo.ifBlank { "-" }}",
+        )
     }
 
     private fun buildDisplayStatusText(): String {
@@ -528,8 +647,8 @@ class HearGlassesController(
 
     private companion object {
         const val TRANSCRIPT_RETENTION_MILLIS = 30_000L
-        const val POLL_INTERVAL_MILLIS = 20L
-        const val ASR_CHUNK_MILLIS = 100
+        const val POLL_INTERVAL_MILLIS = 10L
+        const val ASR_CHUNK_MILLIS = 40
         const val MAX_AUDIO_BACKLOG_MILLIS = 60_000
         const val ASR_CHUNK_SAMPLES = 16_000 * ASR_CHUNK_MILLIS / 1_000
         const val MAX_AUDIO_BACKLOG_SAMPLES = 16_000 * MAX_AUDIO_BACKLOG_MILLIS / 1_000
@@ -539,9 +658,10 @@ class HearGlassesController(
         const val MAX_DISPLAY_TEXT_CHUNK_BYTES = 140
         const val TEXT_CHUNK_WRITE_GAP_MILLIS = 15L
         const val DISPLAY_LINE_UNITS = 24
-        const val PARTIAL_TEXT_WRITE_INTERVAL_MILLIS = 2_000L
+        const val PARTIAL_TEXT_WRITE_INTERVAL_MILLIS = 350L
         const val STATUS_AFTER_TEXT_COOLDOWN_MILLIS = 1_000L
         const val STATUS_WRITE_INTERVAL_MILLIS = 60_000L
+        const val DEBUG_SNAPSHOT_LOG_INTERVAL_MILLIS = 1_000L
         const val STATUS_PREFIX = "@STATUS "
         const val TEXT_PREFIX = "@TEXT "
         const val FINAL_TEXT_PREFIX = "@TEXTF "
